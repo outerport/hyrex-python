@@ -85,7 +85,9 @@ class WorkerAdmin(Process):
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-        self.message_listener_thread = threading.Thread(target=self._message_listener)
+        self.message_listener_thread = threading.Thread(
+            target=self._message_listener, daemon=True
+        )
         self.message_listener_thread.start()
         self.logger.info("Message listener thread now active...")
 
@@ -112,9 +114,12 @@ class WorkerAdmin(Process):
         try:
             # Stop internal message listener
             self.admin_message_queue.put(None)
-            self.message_listener_thread.join()
+            self.message_listener_thread.join(timeout=5.0)
             if self.message_listener_thread.is_alive():
-                self.logger.warning("Message listener thread did not exit cleanly.")
+                self.logger.warning(
+                    "Message listener thread did not exit cleanly within timeout."
+                )
+                # Thread is a daemon, so the interpreter will terminate it on process exit.
             else:
                 self.logger.info("Message listener thread closed successfully.")
 
