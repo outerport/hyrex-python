@@ -341,4 +341,17 @@ class WorkerRootProcess:
         except Exception as e:
             self.logger.error(f"Error during main process shutdown: {e}")
 
+        # Prevent interpreter-shutdown deadlock. Each multiprocessing.Queue this
+        # process wrote to has a feeder thread that drains buffered items into a
+        # pipe whose reader is a child process. When we force-kill a child mid-send,
+        # the feeder blocks forever in pipe_write; atexit's untimed join() on that
+        # thread then hangs the worker (Ctrl-C won't unstick it — signals aren't
+        # delivered to blocked pipe_write during atexit).
+        for queue in (self.admin_message_queue, self.root_message_queue):
+            try:
+                queue.cancel_join_thread()
+                queue.close()
+            except Exception as e:
+                self.logger.error(f"Error closing queue during shutdown: {e}")
+
         self.logger.info("Worker root process completed.")
