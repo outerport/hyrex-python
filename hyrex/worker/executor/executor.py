@@ -351,7 +351,6 @@ class WorkerExecutor(Process):
                 # No logs written to S3
                 asyncio.run(self.process_task_with_logging(task))
 
-            self._stop_event.wait(0.5)  # Add delay after error
             return True
         finally:
             # 1/25 chance to publish stats
