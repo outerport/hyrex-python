@@ -21,6 +21,7 @@ from hyrex import constants
 from hyrex.dispatcher import DequeuedTask, get_dispatcher
 from hyrex.dispatcher.performance_dispatcher import PerformanceDispatcher
 from hyrex.env_vars import EnvVars
+from hyrex.errors import HyrexTaskTimeout
 from hyrex.hyrex_app import HyrexApp, HyrexAppInfo
 from hyrex.hyrex_cache import HyrexCacheManager
 from hyrex.hyrex_context import HyrexContext, clear_hyrex_context, set_hyrex_context
@@ -46,10 +47,6 @@ def generate_executor_name():
     pid = os.getpid()
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     return f"hyrex-executor-{hostname}-{pid}-{timestamp}"
-
-
-class HyrexTaskTimeout(Exception):
-    pass
 
 
 class WorkerExecutor(Process):
@@ -352,6 +349,27 @@ class WorkerExecutor(Process):
                 asyncio.run(self.process_task_with_logging(task))
 
             return True
+        except HyrexTaskTimeout:
+            # The task exceeded its timeout_seconds: the SIGALRM handler set
+            # _stop_event and raised HyrexTaskTimeout, which unwound out of
+            # asyncio.run to here. Surface it explicitly with the task identity
+            # and the retry decision — otherwise the only signal is the generic
+            # "executor stopped" once the loop sees _stop_event. The finally
+            # below returns True (suppressing this), the loop then stops the
+            # executor, and the lost task is requeued by mark_running_tasks_lost
+            # iff attempt_number < max_retries (the same predicate reported as
+            # will_retry here).
+            self.logger.error(
+                "Task timed out",
+                feature=LogFeature.TASK_PROCESSING,
+                task_id=str(task.id),
+                task_name=task.task_name,
+                queue=task.queue,
+                timeout_seconds=task.timeout_seconds,
+                attempt=task.attempt_number,
+                max_retries=task.max_retries,
+                will_retry=task.attempt_number < task.max_retries,
+            )
         finally:
             # 1/25 chance to publish stats
             if random.random() < 0.04:

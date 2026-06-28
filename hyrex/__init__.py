@@ -1,3 +1,4 @@
+from .errors import HyrexTaskTimeout
 from .hyrex_app import HyrexApp
 from .hyrex_cache import HyrexCache
 from .hyrex_context import HyrexContext, get_hyrex_context, get_hyrex_workflow_context
