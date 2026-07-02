@@ -5,7 +5,7 @@ from inspect import signature
 from typing import Any, Callable, Generic, ParamSpec, TypeVar, get_type_hints, overload
 
 import psycopg
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 from uuid6 import uuid7
 
 from hyrex.configs import ConfigPhase, TaskConfig
@@ -46,6 +46,9 @@ class TaskWrapper(Generic[P, R]):
     class ParamInfo(BaseModel):
         """Pydantic model to store parameter information"""
 
+        # Allow any Python type in the type_hint field.
+        model_config = ConfigDict(arbitrary_types_allowed=True)
+
         type_hint: Any
         default: Any = None
         has_default: bool = False
@@ -57,9 +60,6 @@ class TaskWrapper(Generic[P, R]):
                 else str(self.type_hint)
             )
             return f"ParamInfo(type_hint={type_name}, default={self.default}, has_default={self.has_default})"
-
-        class Config:
-            arbitrary_types_allowed = True  # Allow any Python type in type_hint field
 
     def __init__(
         self,

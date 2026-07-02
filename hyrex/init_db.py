@@ -1,3 +1,5 @@
+import os
+
 from sqlalchemy import create_engine
 
 from hyrex.dispatcher.sqlc import (
@@ -11,6 +13,73 @@ from hyrex.dispatcher.sqlc.fill_historical_task_status_counts_table import FILL_
 from hyrex.dispatcher.sqlc.set_orphaned_task_execution_to_lost_and_retry import SET_ORPHANED_TASK_EXECUTION_TO_LOST_AND_RETRY
 from hyrex.dispatcher.sqlc.set_executor_to_lost_if_no_heartbeat import SET_EXECUTOR_TO_LOST_IF_NO_HEARTBEAT
 from hyrex.dispatcher.sqlc.advance_stuck_workflows import ADVANCE_STUCK_WORKFLOWS
+
+
+def _fill_history_cron_enabled() -> bool:
+    """Whether to register the observability-only FillHistoryTaskCountsTable cron.
+
+    Enabled by default (keeps upstream Hyrex behavior). Set
+    HYREX_FILL_HISTORY_CRON_ENABLED to a falsey value (0/false/no/off) to skip it.
+    The cron Seq-scans the entire hyrex_task_run table every minute to feed the
+    Hyrex Studio dashboard, and its cost grows with total table size. Outerport
+    disables it in the worker/init launchers. init_postgres_db runs on every
+    `hyrex init-db` AND every `run-worker` startup, so the flag must be set at
+    every init_db entry point for the cron to stay unregistered across restarts.
+    """
+    return os.environ.get("HYREX_FILL_HISTORY_CRON_ENABLED", "true").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _clean_sqlc_query(query: str) -> str:
+    """Strip SQLC's `-- name:` directive line and `\\:` escapes so raw SQL runs."""
+    lines = query.strip().split("\n")
+    if lines and "-- name:" in lines[0]:
+        lines = lines[1:]
+    return "\n".join(lines).replace("\\:", ":")
+
+
+def _system_cron_specs():
+    """(jobname, schedule, command) for the Hyrex system crons to register.
+
+    The three maintenance crons (orphaned-task, executor-heartbeat, stuck-workflow
+    recovery) are always registered. FillHistoryTaskCountsTable is included only
+    when enabled via HYREX_FILL_HISTORY_CRON_ENABLED (default on).
+    """
+    specs = []
+    if _fill_history_cron_enabled():
+        specs.append(
+            (
+                "FillHistoryTaskCountsTable",
+                "* * * * *",  # Every minute
+                FILL_HISTORICAL_TASK_STATUS_COUNTS_TABLE,
+            )
+        )
+    specs.append(
+        (
+            "SetOrphanedRunningTaskToLost",
+            "* * * * *",  # Every minute
+            SET_ORPHANED_TASK_EXECUTION_TO_LOST_AND_RETRY,
+        )
+    )
+    specs.append(
+        (
+            "SetExecutorToLostIfNoHeartbeat",
+            "* * * * *",  # Every minute
+            SET_EXECUTOR_TO_LOST_IF_NO_HEARTBEAT,
+        )
+    )
+    specs.append(
+        (
+            "AdvanceStuckWorkflows",
+            "*/2 * * * *",  # Every 2 minutes
+            ADVANCE_STUCK_WORKFLOWS,
+        )
+    )
+    return specs
 
 
 def init_postgres_db(conn_string):
@@ -37,59 +106,14 @@ def init_postgres_db(conn_string):
         # Create functions and triggers
         create_functions_sync(conn)
 
-        # Register cron jobs for system tasks
-        # Remove SQLC escape sequences from queries for PostgreSQL execution
-        def clean_sqlc_query(query: str) -> str:
-            """Remove SQLC-specific escape sequences from SQL queries."""
-            # Remove the SQLC comment line with the name directive
-            lines = query.strip().split('\n')
-            if lines and '-- name:' in lines[0]:
-                lines = lines[1:]
-            cleaned = '\n'.join(lines)
-            # Replace SQLC escape sequences \\: with just :
-            cleaned = cleaned.replace('\\:', ':')
-            return cleaned
-        
-        # 1. Fill historical task status counts every minute
-        create_cron_job_for_sql_query_sync(
-            conn,
-            create_cron_job_for_sql_query.CreateCronJobForSqlQueryParams(
-                jobname="FillHistoryTaskCountsTable",
-                schedule="* * * * *",  # Every minute
-                command=clean_sqlc_query(FILL_HISTORICAL_TASK_STATUS_COUNTS_TABLE),
-                should_backfill=False,
-            ),
-        )
-
-        # 2. Set orphaned running tasks to lost every minute
-        create_cron_job_for_sql_query_sync(
-            conn,
-            create_cron_job_for_sql_query.CreateCronJobForSqlQueryParams(
-                jobname="SetOrphanedRunningTaskToLost",
-                schedule="* * * * *",  # Every minute
-                command=clean_sqlc_query(SET_ORPHANED_TASK_EXECUTION_TO_LOST_AND_RETRY),
-                should_backfill=False,
-            ),
-        )
-
-        # 3. Set executors to lost if no heartbeat every minute
-        create_cron_job_for_sql_query_sync(
-            conn,
-            create_cron_job_for_sql_query.CreateCronJobForSqlQueryParams(
-                jobname="SetExecutorToLostIfNoHeartbeat",
-                schedule="* * * * *",  # Every minute
-                command=clean_sqlc_query(SET_EXECUTOR_TO_LOST_IF_NO_HEARTBEAT),
-                should_backfill=False,
-            ),
-        )
-
-        # 4. Advance stuck workflows every 2 minutes
-        create_cron_job_for_sql_query_sync(
-            conn,
-            create_cron_job_for_sql_query.CreateCronJobForSqlQueryParams(
-                jobname="AdvanceStuckWorkflows",
-                schedule="*/2 * * * *",  # Every 2 minutes
-                command=clean_sqlc_query(ADVANCE_STUCK_WORKFLOWS),
-                should_backfill=False,
-            ),
-        )
+        # Register cron jobs for system tasks (FillHistory gated by config).
+        for jobname, schedule, command in _system_cron_specs():
+            create_cron_job_for_sql_query_sync(
+                conn,
+                create_cron_job_for_sql_query.CreateCronJobForSqlQueryParams(
+                    jobname=jobname,
+                    schedule=schedule,
+                    command=_clean_sqlc_query(command),
+                    should_backfill=False,
+                ),
+            )
