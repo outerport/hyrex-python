@@ -16,15 +16,15 @@ from hyrex.dispatcher.sqlc.advance_stuck_workflows import ADVANCE_STUCK_WORKFLOW
 
 
 def _fill_history_cron_enabled() -> bool:
-    """Whether to register the observability-only FillHistoryTaskCountsTable cron.
+    """Whether the observability-only FillHistoryTaskCountsTable cron should run.
 
     Enabled by default (keeps upstream Hyrex behavior). Set
-    HYREX_FILL_HISTORY_CRON_ENABLED to a falsey value (0/false/no/off) to skip it.
-    The cron Seq-scans the entire hyrex_task_run table every minute to feed the
-    Hyrex Studio dashboard, and its cost grows with total table size. Outerport
-    disables it in the worker/init launchers. init_postgres_db runs on every
-    `hyrex init-db` AND every `run-worker` startup, so the flag must be set at
-    every init_db entry point for the cron to stay unregistered across restarts.
+    HYREX_FILL_HISTORY_CRON_ENABLED to a falsey value (0/false/no/off) to disable
+    it. The cron Seq-scans the entire hyrex_task_run table every minute to feed
+    the Hyrex Studio dashboard, and its cost grows with total table size.
+    Outerport disables it in the worker/init launchers. The cron is always
+    registered; this flag drives its `active` column, which init_postgres_db sets
+    on every `hyrex init-db` AND every `run-worker` startup.
     """
     return os.environ.get("HYREX_FILL_HISTORY_CRON_ENABLED", "true").strip().lower() in (
         "1",
@@ -43,43 +43,39 @@ def _clean_sqlc_query(query: str) -> str:
 
 
 def _system_cron_specs():
-    """(jobname, schedule, command) for the Hyrex system crons to register.
+    """(jobname, schedule, command, active) for the Hyrex system crons.
 
-    The three maintenance crons (orphaned-task, executor-heartbeat, stuck-workflow
-    recovery) are always registered. FillHistoryTaskCountsTable is included only
-    when enabled via HYREX_FILL_HISTORY_CRON_ENABLED (default on).
+    All are registered unconditionally so their schedule/command stay current; the
+    config drives only FillHistoryTaskCountsTable's active flag (via
+    HYREX_FILL_HISTORY_CRON_ENABLED, default on), which the scheduler honors
+    (WHERE active = true). The maintenance crons are always active.
     """
-    specs = []
-    if _fill_history_cron_enabled():
-        specs.append(
-            (
-                "FillHistoryTaskCountsTable",
-                "* * * * *",  # Every minute
-                FILL_HISTORICAL_TASK_STATUS_COUNTS_TABLE,
-            )
-        )
-    specs.append(
+    return [
+        (
+            "FillHistoryTaskCountsTable",
+            "* * * * *",  # Every minute
+            FILL_HISTORICAL_TASK_STATUS_COUNTS_TABLE,
+            _fill_history_cron_enabled(),
+        ),
         (
             "SetOrphanedRunningTaskToLost",
             "* * * * *",  # Every minute
             SET_ORPHANED_TASK_EXECUTION_TO_LOST_AND_RETRY,
-        )
-    )
-    specs.append(
+            True,
+        ),
         (
             "SetExecutorToLostIfNoHeartbeat",
             "* * * * *",  # Every minute
             SET_EXECUTOR_TO_LOST_IF_NO_HEARTBEAT,
-        )
-    )
-    specs.append(
+            True,
+        ),
         (
             "AdvanceStuckWorkflows",
             "*/2 * * * *",  # Every 2 minutes
             ADVANCE_STUCK_WORKFLOWS,
-        )
-    )
-    return specs
+            True,
+        ),
+    ]
 
 
 def init_postgres_db(conn_string):
@@ -106,8 +102,10 @@ def init_postgres_db(conn_string):
         # Create functions and triggers
         create_functions_sync(conn)
 
-        # Register cron jobs for system tasks (FillHistory gated by config).
-        for jobname, schedule, command in _system_cron_specs():
+        # Register the system crons. FillHistory's active flag comes from config
+        # (the others are always active), so disabling it both stops new runs and
+        # turns off a row a prior version left active.
+        for jobname, schedule, command, active in _system_cron_specs():
             create_cron_job_for_sql_query_sync(
                 conn,
                 create_cron_job_for_sql_query.CreateCronJobForSqlQueryParams(
@@ -115,5 +113,6 @@ def init_postgres_db(conn_string):
                     schedule=schedule,
                     command=_clean_sqlc_query(command),
                     should_backfill=False,
+                    active=active,
                 ),
             )
