@@ -2,6 +2,9 @@
 # versions:
 #   sqlc v1.29.0
 # source: create_cron_job_for_sql_query.sql
+# NOTE (Outerport fork): hand-maintained -- no sqlc source/config is checked in.
+# The `active` param, `:p5`, and `active = EXCLUDED.active` below are a manual
+# edit (config-driven cron enable/disable); a sqlc regen would clobber them.
 import dataclasses
 from typing import Optional
 
@@ -12,15 +15,15 @@ from . import models
 
 
 CREATE_CRON_JOB_FOR_SQL_QUERY = """-- name: create_cron_job_for_sql_query \\:exec
-INSERT INTO hyrex_cron_job (schedule, command, jobname, should_backfill, job_source)
-VALUES (:p1, :p2, :p3, :p4, 'SYSTEM')
-ON CONFLICT (jobname) 
-DO UPDATE SET 
+INSERT INTO hyrex_cron_job (schedule, command, jobname, should_backfill, job_source, active)
+VALUES (:p1, :p2, :p3, :p4, 'SYSTEM', :p5)
+ON CONFLICT (jobname)
+DO UPDATE SET
     schedule = EXCLUDED.schedule,
     command = EXCLUDED.command,
     should_backfill = EXCLUDED.should_backfill,
     job_source = 'SYSTEM',
-    active = true
+    active = EXCLUDED.active
 """
 
 
@@ -30,6 +33,7 @@ class CreateCronJobForSqlQueryParams:
     command: str
     jobname: str
     should_backfill: Optional[bool]
+    active: bool = True
 
 
 class Querier:
@@ -42,6 +46,7 @@ class Querier:
             "p2": arg.command,
             "p3": arg.jobname,
             "p4": arg.should_backfill,
+            "p5": arg.active,
         })
 
 
@@ -55,4 +60,5 @@ class AsyncQuerier:
             "p2": arg.command,
             "p3": arg.jobname,
             "p4": arg.should_backfill,
+            "p5": arg.active,
         })
