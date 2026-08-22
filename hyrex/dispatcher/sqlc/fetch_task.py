@@ -14,18 +14,24 @@ from . import models
 
 
 FETCH_TASK = """-- name: fetch_task \\:one
-WITH next_task AS (SELECT id
+WITH active_executor AS (SELECT id
+                         FROM hyrex_executor
+                         WHERE id = :p1\\:\\:UUID
+                           AND status = 'RUNNING'\\:\\:executor_status
+                         FOR SHARE),
+     next_task AS (SELECT hyrex_task_run.id
                    FROM hyrex_task_run
+                   CROSS JOIN active_executor
                    WHERE hyrex_task_run.queue = :p2
                      AND hyrex_task_run.status = 'QUEUED'\\:\\:task_run_status
                      AND hyrex_task_run.task_name = ANY(:p3\\:\\:VARCHAR[])
                    ORDER BY priority ASC, queued
-                       FOR UPDATE SKIP LOCKED
+                       FOR UPDATE OF hyrex_task_run SKIP LOCKED
                    LIMIT 1)
 UPDATE hyrex_task_run AS ht
 SET status      = 'RUNNING'\\:\\:task_run_status,
     started     = CURRENT_TIMESTAMP,
-    executor_id = :p1
+    executor_id = :p1\\:\\:UUID
 FROM next_task
 WHERE ht.id = next_task.id
 RETURNING ht.id
