@@ -14,17 +14,23 @@ from . import models
 
 
 FETCH_TASK_WITH_CONCURRENCY_LIMIT = """-- name: fetch_task_with_concurrency_limit \\:one
-WITH lock_result AS (SELECT pg_try_advisory_xact_lock(hashtext(:p2\\:\\:VARCHAR)) AS lock_acquired),
-     next_task AS (SELECT id
-                   FROM hyrex_task_run,
-                        lock_result
+WITH active_executor AS (SELECT id
+                         FROM hyrex_executor
+                         WHERE id = :p1\\:\\:UUID
+                           AND status = 'RUNNING'\\:\\:executor_status
+                         FOR SHARE),
+     lock_result AS (SELECT pg_try_advisory_xact_lock(hashtext(:p2\\:\\:VARCHAR)) AS lock_acquired),
+     next_task AS (SELECT hyrex_task_run.id
+                   FROM hyrex_task_run
+                   CROSS JOIN active_executor
+                   CROSS JOIN lock_result
                    WHERE lock_acquired = TRUE
                      AND hyrex_task_run.queue = :p2\\:\\:VARCHAR
                      AND hyrex_task_run.status = 'QUEUED'\\:\\:task_run_status
                      AND hyrex_task_run.task_name = ANY(:p3\\:\\:VARCHAR[])
                      AND (SELECT COUNT(*) FROM hyrex_task_run WHERE hyrex_task_run.queue = :p2\\:\\:VARCHAR AND hyrex_task_run.status = 'RUNNING'\\:\\:task_run_status) < :p4\\:\\:INT
                    ORDER BY priority ASC, queued
-                       FOR UPDATE SKIP LOCKED
+                       FOR UPDATE OF hyrex_task_run SKIP LOCKED
                    LIMIT 1)
 UPDATE hyrex_task_run AS ht
 SET status         = 'RUNNING'\\:\\:task_run_status,
